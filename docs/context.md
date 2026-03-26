@@ -71,4 +71,5 @@
 1. ~~config.py~~
 2. ~~ocr_service.py~~
 3. ~~bot.py (хэндлеры, temp, интеграция, логи)~~
-4. При необходимости: requirements.txt, деплой
+4. ~~requirements.txt~~
+5. При необходимости: деплой
