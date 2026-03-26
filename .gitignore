@@ -1,0 +1,9 @@
+.env
+__pycache__/
+temp/
+.env
+*.pyc
+venv/
+*.log
+images/
+.cursor/
