@@ -7,3 +7,5 @@ venv/
 *.log
 images/
 .cursor/
+bot.log
+*.db
