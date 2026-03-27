@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
-import mimetypes
-import re
 import random
+import re
 import time
-from pathlib import Path
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -45,35 +44,21 @@ _quota_blocked_is_daily: bool = False
 _DAILY_QUOTA_MESSAGE: str = "Дневной лимит Google API исчерпан"
 
 
-def _mime_for_path(path: Path) -> str:
-    mime, _ = mimetypes.guess_type(str(path))
-    if mime and mime.startswith("image/"):
-        return mime
-    return "image/jpeg"
-
-
-def _compress_image_for_gemini(image_path: Path) -> Path:
+def _compress_image_for_gemini(image_bytes: bytes) -> bytes:
     """
     Сжимает изображение для уменьшения нагрузки на Gemini (bytes / tokens).
-    Возвращает путь к сжатому файлу (или исходный путь при ошибках/отсутствии Pillow).
+    Возвращает сжатые байты (или исходные при ошибках/отсутствии Pillow).
     """
     try:
         from PIL import Image  # type: ignore
     except Exception:
         logger.warning("Pillow не установлен. Сжатие изображения пропущено.")
-        return image_path
-
-    try:
-        original_size = image_path.stat().st_size
-    except OSError:
-        original_size = None
-
-    out_path = image_path.with_name(f"{image_path.stem}_compressed.jpg")
+        return image_bytes
     max_dim = 1600
     quality = 70
 
     try:
-        with Image.open(image_path) as img:
+        with Image.open(io.BytesIO(image_bytes)) as img:
             if img.mode in ("RGBA", "LA"):
                 # Накладываем альфу на белый фон, чтобы сохранить читаемость цен.
                 bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
@@ -90,22 +75,15 @@ def _compress_image_for_gemini(image_path: Path) -> Path:
                 new_h = max(1, int(h * scale))
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(out_path, format="JPEG", quality=quality, optimize=True)
+            out_buffer = io.BytesIO()
+            img.save(out_buffer, format="JPEG", quality=quality, optimize=True)
+            compressed = out_buffer.getvalue()
 
-        try:
-            new_size = out_path.stat().st_size
-            if original_size is not None:
-                logger.info(
-                    f"Сжатие изображения: {original_size} -> {new_size} байт"
-                )
-        except OSError:
-            pass
-
-        return out_path
+        logger.info(f"Сжатие изображения: {len(image_bytes)} -> {len(compressed)} байт")
+        return compressed
     except Exception:
         logger.exception("Не удалось сжать изображение; используем исходное.")
-        return image_path
+        return image_bytes
 
 
 def _is_permanent_quota_error(error_message: str) -> bool:
@@ -133,7 +111,7 @@ def _is_daily_quota_exhausted(error_message: str) -> bool:
     return "limit: 0" in msg
 
 
-def _sync_generate_raw_text(image_path: Path, api_key: str) -> str | None:
+def _sync_generate_raw_text(image_bytes: bytes, api_key: str) -> str | None:
     """Синхронный вызов Gemini через Client; выполняется в пуле потоков."""
     global _quota_blocked_until_monotonic
     global _quota_blocked_is_daily
@@ -147,11 +125,9 @@ def _sync_generate_raw_text(image_path: Path, api_key: str) -> str | None:
         )
         return _DAILY_QUOTA_MESSAGE if _quota_blocked_is_daily else None
 
-    image_bytes = image_path.read_bytes()
-    mime = _mime_for_path(image_path)
     contents = [
         _GEMINI_PROMPT,
-        types.Part.from_bytes(data=image_bytes, mime_type=mime),
+        types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
     ]
 
     for attempt in range(_GEMINI_RETRY_MAX_ATTEMPTS):
@@ -348,42 +324,31 @@ def _parse_amount(raw: str) -> float | None:
 
 
 async def get_amount_from_checkpoint(
-    image_path: str | Path,
+    image_bytes: bytes,
 ) -> float | str | None:
     """
     Асинхронно извлекает сумму с изображения чека.
     При ошибке API, сети, таймауте или отсутствии суммы возвращает None.
     """
-    path = Path(image_path)
-    if not path.is_file():
-        logger.error(f"Файл изображения не найден: {path}")
+    if not image_bytes:
+        logger.error("Пустые байты изображения для OCR.")
         return None
 
     cfg = get_config()
-    compressed_path = await asyncio.to_thread(_compress_image_for_gemini, path)
+    compressed_bytes = await asyncio.to_thread(_compress_image_for_gemini, image_bytes)
     try:
         raw = await asyncio.wait_for(
             asyncio.to_thread(
-                _sync_generate_raw_text, compressed_path, cfg.gemini_api_key
+                _sync_generate_raw_text, compressed_bytes, cfg.gemini_api_key
             ),
             timeout=_GEMINI_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
-        logger.warning(f"Таймаут Gemini ({_GEMINI_TIMEOUT_SEC} с) для {path}")
+        logger.warning(f"Таймаут Gemini ({_GEMINI_TIMEOUT_SEC} с) при обработке фото.")
         return None
     except Exception:
         logger.exception("Неожиданная ошибка при вызове OCR.")
         return None
-    finally:
-        # Удаляем только сжатую копию (исходник удаляется в bot.py).
-        if compressed_path != path:
-            try:
-                if compressed_path.is_file():
-                    compressed_path.unlink()
-            except OSError as e:
-                logger.warning(
-                    f"Не удалось удалить временный сжатый файл {compressed_path}: {e}"
-                )
 
     if raw is None:
         return None

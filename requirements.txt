@@ -2,4 +2,6 @@ aiogram>=3.0.0,<4.0.0
 python-dotenv>=1.0.0
 google-genai
 Pillow
+SQLAlchemy>=2.0.0
+aiosqlite
 

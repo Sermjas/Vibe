@@ -1,27 +1,27 @@
 # Context — Telegram OCR Bot Project
 
 ## 📁 Состояние проекта
-- config.py ✅ (dotenv, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, get_config)
-- ocr_service.py ✅ (get_amount_from_checkpoint, Gemini `gemini-2.5-flash-lite`, AFC off, 404/429 handling, сжатие фото, парсинг)
-- bot.py ✅ (/start, фото → temp/, ручной ввод числа, fallback-хэндлер, логи)
+- config.py ✅ (dotenv, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, DATABASE_URL, get_config)
+- ocr_service.py ✅ (get_amount_from_checkpoint по bytes, Gemini `gemini-2.5-flash-lite`, AFC off, 404/429 handling, сжатие фото в памяти, парсинг)
+- bot.py ✅ (/start с регистрацией, OCR из памяти, запись транзакций, inline-статистика, логи в bot.log)
+- database.py ✅ (SQLAlchemy 2.0 async + aiosqlite, модели User/Transaction, запросы статистики)
 
 ## 🏗 Архитектура проекта
 /project
   config.py           # Конфигурация, dotenv, загрузка токенов
+  database.py         # Асинхронный слой БД (SQLAlchemy 2.0 + aiosqlite)
   ocr_service.py      # Асинхронная OCR-функция для обработки чеков через Google Gemini
-  bot.py              # aiogram 3.x бот
-  /temp               # Временные фото чеков
+  bot.py              # aiogram 3.x бот (интерфейс, хэндлеры, callbacks)
   /docs
     context.md        # Текущий контекст проекта и решения
 
 ### Поток работы (как должно быть)
-1. Пользователь присылает фото чека
-2. bot.py сохраняет фото в temp/
-3. bot.py вызывает get_amount_from_checkpoint из ocr_service.py
-4. Если сумма найдена → бот пишет "Расход записан: [сумма] руб."
-5. Если возвращается `Дневной лимит Google API исчерпан` → бот показывает это сообщение пользователю (повторные фото не помогут).
-6. Если None → бот пишет "Не удалось распознать сумму. Попробуй более четкое фото чека и отправь снова."
-7. Логирование всех ошибок и действий
+1. Пользователь отправляет `/start`, бот регистрирует пользователя в БД и показывает кнопку `📊 Моя статистика`.
+2. Пользователь присылает фото чека.
+3. bot.py скачивает фото в `io.BytesIO` (без файлов на диске) и передаёт байты в `ocr_service.py`.
+4. OCR извлекает сумму; при успехе bot.py сохраняет транзакцию в таблицу `transactions` (amount + telegram_file_id).
+5. По inline-кнопкам статистики бот показывает сумму за всё время или с начала месяца.
+6. Все ключевые этапы и ошибки пишутся в консоль и в `bot.log`.
 
 ---
 
@@ -42,7 +42,7 @@
 - В `ocr_service.py`: при `404` (модель/ресурс недоступен) ретраи не выполняются, возвращаем `None`.
 
 ### Сжатие изображения перед Gemini
-- В `ocr_service.py` перед отправкой в Gemini выполняется сжатие через Pillow, чтобы уменьшить размер изображения и снизить шанс 429 по нагрузке.
+- В `ocr_service.py` перед отправкой в Gemini выполняется сжатие через Pillow в памяти (`bytes -> bytes`), чтобы уменьшить размер изображения и снизить шанс 429 по нагрузке.
 - Предупреждение `Pillow не установлен` означает, что библиотека отсутствует в текущем Python-окружении запуска бота.
 
 ---
@@ -52,7 +52,13 @@
 - python-dotenv
 - google-genai (`genai.Client`)
 - Pillow (сжатие изображений)
+- SQLAlchemy 2.0 (async ORM)
+- aiosqlite (асинхронный SQLite-драйвер)
 - asyncio / async best practices
+
+### Таблицы БД
+- `users`: `id`, `telegram_id`, `username`, `reg_date`.
+- `transactions`: `id`, `user_id`, `amount (Numeric)`, `telegram_file_id`, `created_at`.
 
 ---
 
