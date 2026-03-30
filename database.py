@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Numeric, String, func, select
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, JSON, Numeric, String, func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -30,6 +30,8 @@ class User(Base):
         BigInteger, unique=True, index=True, nullable=False
     )
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Признак администратора (используется для /admin).
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reg_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -49,7 +51,11 @@ class Transaction(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Категория транзакции (может быть выбрана пользователем/определена OCR).
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     telegram_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Сырые данные OCR (JSON), полезно для диагностики/повторной обработки.
+    raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -76,7 +82,11 @@ class Database:
         )
 
     async def init_models(self) -> None:
-        """Создаёт таблицы, если их ещё нет."""
+        """Создаёт таблицы, если их ещё нет.
+
+        Важно: `create_all` не мигрирует существующие таблицы. Если БД уже создана
+        без новых колонок, потребуется пересоздание/миграция вне этого кода.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -104,13 +114,17 @@ class Database:
         user_id: int,
         amount: Decimal,
         telegram_file_id: str | None,
+        category: str | None = None,
+        raw_data: dict | None = None,
     ) -> None:
         """Сохраняет транзакцию пользователя."""
         async with self._session_factory() as session:
             tx = Transaction(
                 user_id=user_id,
                 amount=amount,
+                category=category,
                 telegram_file_id=telegram_file_id,
+                raw_data=raw_data,
             )
             session.add(tx)
             await session.commit()
@@ -133,4 +147,39 @@ class Database:
             )
             value = await session.scalar(stmt)
             return Decimal(str(value or 0))
+
+    async def get_users_count(self) -> int:
+        """Количество пользователей в системе."""
+        async with self._session_factory() as session:
+            stmt = select(func.count(User.id))
+            value = await session.scalar(stmt)
+            return int(value or 0)
+
+    async def get_today_total_sum(self) -> Decimal:
+        """Общая сумма транзакций за сегодня (UTC)."""
+        async with self._session_factory() as session:
+            now = datetime.now(timezone.utc)
+            day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            stmt = select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+                Transaction.created_at >= day_start,
+                Transaction.created_at < day_end,
+            )
+            value = await session.scalar(stmt)
+            return Decimal(str(value or 0))
+
+    async def get_user_transactions(
+        self, user_id: int, limit: int | None = None
+    ) -> list[Transaction]:
+        """Возвращает транзакции пользователя (свежие сверху)."""
+        async with self._session_factory() as session:
+            stmt = (
+                select(Transaction)
+                .where(Transaction.user_id == user_id)
+                .order_by(Transaction.created_at.desc())
+            )
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            rows = await session.scalars(stmt)
+            return list(rows.all())
 

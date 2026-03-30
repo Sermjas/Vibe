@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import random
 import re
@@ -17,11 +18,20 @@ from config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Промпт: эксперт по чекам, только число или None
+# Промпт: эксперт по чекам, строго JSON (amount + category)
 _GEMINI_PROMPT = (
-    "Ты эксперт по финансовым чекам. Найди итоговую сумму покупки "
-    "(ориентируйся на слова 'Итого','Итог', 'Total', 'К оплате'). "
-    "Верни ТОЛЬКО число. Если суммы нет, верни 'None'"
+    "Ты эксперт по финансовым чекам. На фото — чек. "
+    "Твоя задача: определить итоговую сумму покупки и категорию расхода.\n"
+    "\n"
+    "Верни СТРОГО валидный JSON и ничего больше, без Markdown, без пояснений, без текста вокруг.\n"
+    "Формат ответа:\n"
+    '{"amount": 123.45, "category": "Категория"}\n'
+    "\n"
+    "Правила:\n"
+    "- Сумма: ищи итог (ориентируйся на слова «Итого», «Итог», «Total», «К оплате»).\n"
+    "- Если сумму определить нельзя, верни amount: null.\n"
+    "- category должна быть одной из: Продукты, Рестораны, Транспорт, Одежда, Здоровье, Развлечения, Другое.\n"
+    "- Если не уверен в категории, выбери «Другое».\n"
 )
 
 # Модель с поддержкой изображения (Gemini API)
@@ -323,12 +333,88 @@ def _parse_amount(raw: str) -> float | None:
         return None
 
 
-async def get_amount_from_checkpoint(
-    image_bytes: bytes,
-) -> float | str | None:
+def _extract_json_object(raw: str) -> str | None:
+    """Пытается вытащить JSON-объект из ответа модели (на случай лишнего текста)."""
+    t = (raw or "").strip()
+    if not t:
+        return None
+    # Убираем популярные обёртки ```json ... ```
+    t = re.sub(r"^\s*```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*```\s*$", "", t)
+
+    # Если уже похоже на объект — пробуем как есть.
+    if t.startswith("{") and t.endswith("}"):
+        return t
+
+    # Иначе ищем первый {...} блок.
+    start = t.find("{")
+    end = t.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return t[start : end + 1]
+    return None
+
+
+def _normalize_category(value: str | None) -> str:
+    """Нормализует категорию в одну из допустимых."""
+    allowed = {
+        "Продукты",
+        "Рестораны",
+        "Транспорт",
+        "Одежда",
+        "Здоровье",
+        "Развлечения",
+        "Другое",
+    }
+    if not value:
+        return "Другое"
+    v = value.strip()
+    if v in allowed:
+        return v
+    # Небольшая попытка сопоставления по нижнему регистру.
+    lower_map = {a.lower(): a for a in allowed}
+    return lower_map.get(v.lower(), "Другое")
+
+
+def _parse_ocr_json(raw: str) -> dict | None:
+    """Парсит JSON-ответ Gemini в формате {amount, category}."""
+    obj_text = _extract_json_object(raw)
+    if obj_text is None:
+        logger.warning("Не удалось выделить JSON из ответа Gemini: %r", raw)
+        return None
+    try:
+        data = json.loads(obj_text)
+    except Exception:
+        logger.warning("Ответ Gemini не является валидным JSON: %r", raw)
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    amount_raw = data.get("amount", None)
+    amount: float | None
+    if amount_raw is None:
+        amount = None
+    elif isinstance(amount_raw, (int, float)):
+        amount = float(amount_raw)
+    elif isinstance(amount_raw, str):
+        # На всякий случай: если модель вернула строку, пробуем вытащить число старым парсером.
+        amount = _parse_amount(amount_raw)
+    else:
+        amount = None
+
+    category = _normalize_category(data.get("category") if isinstance(data.get("category"), str) else None)
+
+    # raw_data сохраняем максимально близким к ответу модели, но с нормализованной категорией.
+    return {"amount": amount, "category": category}
+
+
+async def get_amount_from_checkpoint(image_bytes: bytes) -> dict | str | None:
     """
-    Асинхронно извлекает сумму с изображения чека.
-    При ошибке API, сети, таймауте или отсутствии суммы возвращает None.
+    Асинхронно извлекает данные чека (amount + category) с изображения.
+    Возвращает:
+    - dict: {"amount": float|None, "category": str}
+    - str: сообщение об исчерпании дневной квоты
+    - None: если распознать не удалось (ошибка/пустой ответ)
     """
     if not image_bytes:
         logger.error("Пустые байты изображения для OCR.")
@@ -354,4 +440,12 @@ async def get_amount_from_checkpoint(
         return None
     if raw == _DAILY_QUOTA_MESSAGE:
         return raw
-    return _parse_amount(raw)
+    parsed = _parse_ocr_json(raw)
+    if parsed is not None:
+        return parsed
+
+    # Фоллбек: если JSON не распарсился, попробуем хотя бы сумму по старой логике.
+    amount = _parse_amount(raw)
+    if amount is None:
+        return None
+    return {"amount": amount, "category": "Другое"}

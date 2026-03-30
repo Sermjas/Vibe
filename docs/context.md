@@ -2,9 +2,9 @@
 
 ## 📁 Состояние проекта
 - config.py ✅ (dotenv, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, DATABASE_URL, get_config)
-- ocr_service.py ✅ (get_amount_from_checkpoint по bytes, Gemini `gemini-2.5-flash-lite`, AFC off, 404/429 handling, сжатие фото в памяти, парсинг)
-- bot.py ✅ (/start с регистрацией, OCR из памяти, запись транзакций, inline-статистика, логи в bot.log)
-- database.py ✅ (SQLAlchemy 2.0 async + aiosqlite, модели User/Transaction, запросы статистики)
+- ocr_service.py ✅ (Gemini `gemini-2.5-flash-lite`, AFC off, 404/429 handling, сжатие фото в памяти, **строго JSON**: amount+category)
+- bot.py ✅ (/start с регистрацией, OCR из памяти, **подтверждение перед записью**, FSM, inline-статистика, /admin, /export, логи в bot.log)
+- database.py ✅ (SQLAlchemy 2.0 async + aiosqlite, модели User/Transaction, **is_admin**, category/raw_data, запросы админки и экспорта)
 
 ## 🏗 Архитектура проекта
 /project
@@ -19,16 +19,19 @@
 1. Пользователь отправляет `/start`, бот регистрирует пользователя в БД и показывает кнопку `📊 Моя статистика`.
 2. Пользователь присылает фото чека.
 3. bot.py скачивает фото в `io.BytesIO` (без файлов на диске) и передаёт байты в `ocr_service.py`.
-4. OCR извлекает сумму; при успехе bot.py сохраняет транзакцию в таблицу `transactions` (amount + telegram_file_id).
+4. OCR извлекает **сумму и категорию** (JSON). Бот **не записывает сразу** — показывает inline-кнопки подтверждения/исправления.
+5. Запись транзакции в таблицу `transactions` происходит **только после нажатия "✅ Верно"** (amount + category + telegram_file_id + raw_data).
 5. По inline-кнопкам статистики бот показывает сумму за всё время или с начала месяца.
 6. Все ключевые этапы и ошибки пишутся в консоль и в `bot.log`.
 
 ---
 
 ## Промпт Gemini (ocr_service.py)
-- Роль: эксперт по финансовым чекам; на фото — итоговая сумма покупки.
+- Роль: эксперт по финансовым чекам; на фото — чек (нужны сумма + категория).
 - Ориентиры на чеке: слова «Итого», «Итог», «Total», «К оплате».
-- Ответ модели: **только число**; если суммы нет — `None`.
+- Ответ модели: **строго JSON** вида `{"amount": 123.45, "category": "Категория"}`.
+- Категории: Продукты, Рестораны, Транспорт, Одежда, Здоровье, Развлечения, Другое.
+- Если сумма не найдена: `amount` = `null`.
 
 ### Ошибка HTTP 429 (Gemini)
 - Это лимит квоты / частоты запросов к API, а не «плохое фото».
@@ -57,8 +60,8 @@
 - asyncio / async best practices
 
 ### Таблицы БД
-- `users`: `id`, `telegram_id`, `username`, `reg_date`.
-- `transactions`: `id`, `user_id`, `amount (Numeric)`, `telegram_file_id`, `created_at`.
+- `users`: `id`, `telegram_id`, `username`, `is_admin`, `reg_date`.
+- `transactions`: `id`, `user_id`, `amount (Numeric)`, `category`, `telegram_file_id`, `raw_data (JSON)`, `created_at`.
 
 ---
 
