@@ -49,9 +49,9 @@ _QUOTA_COOLDOWN_SEC: float = 600.0  # 10 минут паузы при посто
 
 # Глобальная пауза для OCR после подтверждённого исчерпания квоты.
 _quota_blocked_until_monotonic: float = 0.0
-_quota_blocked_is_daily: bool = False
 
-_DAILY_QUOTA_MESSAGE: str = "Дневной лимит Google API исчерпан"
+# Сигнал для bot.py: лимит Gemini (HTTP 429 / квота), пауза ~10 минут.
+OCR_RATE_LIMIT_ERROR = "OCR_RATE_LIMIT_429"
 
 
 def _compress_image_for_gemini(image_bytes: bytes) -> bytes:
@@ -124,7 +124,6 @@ def _is_daily_quota_exhausted(error_message: str) -> bool:
 def _sync_generate_raw_text(image_bytes: bytes, api_key: str) -> str | None:
     """Синхронный вызов Gemini через Client; выполняется в пуле потоков."""
     global _quota_blocked_until_monotonic
-    global _quota_blocked_is_daily
 
     now = time.monotonic()
     if now < _quota_blocked_until_monotonic:
@@ -133,7 +132,7 @@ def _sync_generate_raw_text(image_bytes: bytes, api_key: str) -> str | None:
             "OCR временно приостановлен из-за исчерпанной квоты Gemini. "
             f"Осталось ждать примерно {wait_left:.0f} с."
         )
-        return _DAILY_QUOTA_MESSAGE if _quota_blocked_is_daily else None
+        return OCR_RATE_LIMIT_ERROR
 
     contents = [
         _GEMINI_PROMPT,
@@ -172,27 +171,25 @@ def _sync_generate_raw_text(image_bytes: bytes, api_key: str) -> str | None:
                     _quota_blocked_until_monotonic = (
                         time.monotonic() + _QUOTA_COOLDOWN_SEC
                     )
-                    _quota_blocked_is_daily = True
                     logger.error(
                         "Истощен дневной лимит Gemini API (HTTP 429): %s. "
                         "Повторы отключены.",
                         message,
                     )
-                    return _DAILY_QUOTA_MESSAGE
+                    return OCR_RATE_LIMIT_ERROR
 
                 # Постоянная квотная ошибка: отключаем ретраи на время cooldown.
                 if _is_permanent_quota_error(message):
                     _quota_blocked_until_monotonic = (
                         time.monotonic() + _QUOTA_COOLDOWN_SEC
                     )
-                    _quota_blocked_is_daily = False
                     logger.error(
                         "Постоянная квотная ошибка Gemini (HTTP 429): %s. "
                         "Повторы отключены, OCR приостановлен на %.0f с.",
                         message,
                         _QUOTA_COOLDOWN_SEC,
                     )
-                    return None
+                    return OCR_RATE_LIMIT_ERROR
 
                 # Временная 429: делаем backoff + jitter.
                 if attempt < _GEMINI_RETRY_MAX_ATTEMPTS - 1:
@@ -206,6 +203,11 @@ def _sync_generate_raw_text(image_bytes: bytes, api_key: str) -> str | None:
                     )
                     time.sleep(wait_total)
                     continue
+                logger.warning(
+                    "Исчерпаны повторы после HTTP 429 (ResourceExhausted), пауза ~%.0f с.",
+                    _QUOTA_COOLDOWN_SEC,
+                )
+                return OCR_RATE_LIMIT_ERROR
 
             logger.error(
                 "Ошибка клиента Gemini API: HTTP %s. %s",
@@ -413,7 +415,7 @@ async def get_amount_from_checkpoint(image_bytes: bytes) -> dict | str | None:
     Асинхронно извлекает данные чека (amount + category) с изображения.
     Возвращает:
     - dict: {"amount": float|None, "category": str}
-    - str: сообщение об исчерпании дневной квоты
+    - str: константа OCR_RATE_LIMIT_ERROR при лимите Gemini (HTTP 429 / квота)
     - None: если распознать не удалось (ошибка/пустой ответ)
     """
     if not image_bytes:
@@ -438,7 +440,7 @@ async def get_amount_from_checkpoint(image_bytes: bytes) -> dict | str | None:
 
     if raw is None:
         return None
-    if raw == _DAILY_QUOTA_MESSAGE:
+    if raw == OCR_RATE_LIMIT_ERROR:
         return raw
     parsed = _parse_ocr_json(raw)
     if parsed is not None:
