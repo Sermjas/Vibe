@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 _db: Database | None = None
+_admin_id: int | None = None
 
 _CB_STATS_MENU = "stats:menu"
 _CB_STATS_ALL = "stats:all"
@@ -49,6 +50,9 @@ _CB_OCR_CONFIRM = "ocr:confirm"
 _CB_OCR_EDIT_AMOUNT = "ocr:edit_amount"
 _CB_OCR_CATEGORY_MENU = "ocr:category_menu"
 _CB_OCR_CATEGORY_PREFIX = "ocr:category:"
+
+_CB_MOD_APPROVE = "mod:approve:"
+_CB_MOD_BLOCK = "mod:block:"
 
 _CATEGORIES: list[str] = [
     "Продукты",
@@ -100,10 +104,39 @@ def _category_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _moderation_keyboard(target_telegram_id: int) -> InlineKeyboardMarkup:
+    """Кнопки модерации для админов (Разрешить / Заблокировать)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Разрешить",
+                    callback_data=f"{_CB_MOD_APPROVE}{target_telegram_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Заблокировать",
+                    callback_data=f"{_CB_MOD_BLOCK}{target_telegram_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def _pending_access_text() -> str:
+    """Сообщение для пользователей с is_active=False."""
+    return "Ваш аккаунт находится на модерации. Пожалуйста, дождитесь разрешения от администратора."
+
+
 def _get_db() -> Database:
     if _db is None:
         raise RuntimeError("База данных не инициализирована.")
     return _db
+
+
+def _get_admin_id() -> int:
+    if _admin_id is None:
+        raise RuntimeError("ADMIN_ID не инициализирован.")
+    return _admin_id
 
 
 def _stats_main_keyboard() -> InlineKeyboardMarkup:
@@ -182,7 +215,7 @@ def _parse_amount_from_text(text: str) -> Decimal | None:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, bot: Bot) -> None:
     if message.from_user is None:
         await message.answer("Не удалось определить пользователя Telegram.")
         return
@@ -199,10 +232,100 @@ async def cmd_start(message: Message) -> None:
             message.from_user.username,
         )
 
+        # Уведомляем админов о новом пользователе для модерации.
+        admins = await db.get_admin_users()
+        if admins:
+            username = message.from_user.username or "N/A"
+            user_id = message.from_user.id
+            for admin in admins:
+                await bot.send_message(
+                    chat_id=admin.telegram_id,
+                    text=(
+                        "Новая регистрация пользователя\n"
+                        f"ID: {user_id}\n"
+                        f"Username: @{username}\n"
+                        "Разрешить / Заблокировать для предоставления или отказа в доступе."
+                    ),
+                    reply_markup=_moderation_keyboard(user_id),
+                )
+        else:
+            logger.warning("Админы не найдены: модерация новых пользователей отключена.")
+
+    if not result.user.is_active:
+        await message.answer(_pending_access_text())
+        return
+
     await message.answer(
         "Вы зарегистрированы. Пришлите фото чека — я попробую определить сумму покупки.",
         reply_markup=_stats_main_keyboard(),
     )
+
+
+@router.callback_query(F.data.startswith(_CB_MOD_APPROVE))
+async def on_moderation_approve(callback: CallbackQuery, bot: Bot) -> None:
+    """Админ подтверждает доступ пользователю."""
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    db = _get_db()
+    admin_user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+    )
+    if not admin_user.user.is_admin:
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.data is None:
+        await callback.answer()
+        return
+
+    telegram_id_str = callback.data[len(_CB_MOD_APPROVE) :]
+    try:
+        target_telegram_id = int(telegram_id_str)
+    except ValueError:
+        await callback.answer("Неверный ID пользователя", show_alert=True)
+        return
+
+    await db.set_user_active_by_telegram_id(target_telegram_id, True)
+    await bot.send_message(chat_id=target_telegram_id, text="Доступ предоставлен.")
+    await callback.answer("Разрешено")
+
+
+@router.callback_query(F.data.startswith(_CB_MOD_BLOCK))
+async def on_moderation_block(callback: CallbackQuery, bot: Bot) -> None:
+    """Админ блокирует доступ пользователю."""
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    db = _get_db()
+    admin_user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+    )
+    if not admin_user.user.is_admin:
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    if callback.data is None:
+        await callback.answer()
+        return
+
+    telegram_id_str = callback.data[len(_CB_MOD_BLOCK) :]
+    try:
+        target_telegram_id = int(telegram_id_str)
+    except ValueError:
+        await callback.answer("Неверный ID пользователя", show_alert=True)
+        return
+
+    await db.set_user_active_by_telegram_id(target_telegram_id, False)
+    await bot.send_message(
+        chat_id=target_telegram_id,
+        text="Ваш аккаунт заблокирован.",
+    )
+    await callback.answer("Заблокировано", show_alert=True)
 
 
 @router.message(Command("export"))
@@ -274,6 +397,20 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext) -> None:
         telegram_id=message.from_user.id,
         username=message.from_user.username,
     )
+    if not user_result.user.is_active:
+        await state.clear()
+        await message.answer(_pending_access_text())
+        return
+    # Суточный лимит OCR для обычных пользователей (админ исключён).
+    if message.from_user.id != _get_admin_id():
+        used_today = await db.check_user_limit(user_result.user.id)
+        if used_today >= 3:
+            await state.clear()
+            await message.answer(
+                "Your daily limit (3 receipts) has been reached. Please come back tomorrow!"
+            )
+            return
+
     photo = message.photo[-1]
     image_buffer = io.BytesIO()
 
@@ -343,6 +480,18 @@ async def on_ocr_edit_amount(callback: CallbackQuery, state: FSMContext) -> None
     if callback.message is None:
         await callback.answer()
         return
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if not isinstance(user_id, int):
+        await callback.answer("Нет данных для подтверждения.", show_alert=True)
+        return
+    db = _get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None or not user.is_active:
+        await state.clear()
+        await callback.message.answer(_pending_access_text())
+        await callback.answer("Not active", show_alert=True)
+        return
     await state.set_state(ReceiptStates.waiting_manual_amount)
     await callback.message.answer("Введите сумму вручную (например: 123.45).")
     await callback.answer()
@@ -353,6 +502,18 @@ async def on_ocr_category_menu(callback: CallbackQuery, state: FSMContext) -> No
     if callback.message is None:
         await callback.answer()
         return
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if not isinstance(user_id, int):
+        await callback.answer("Нет данных для подтверждения.", show_alert=True)
+        return
+    db = _get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None or not user.is_active:
+        await state.clear()
+        await callback.message.answer(_pending_access_text())
+        await callback.answer("Not active", show_alert=True)
+        return
     await state.set_state(ReceiptStates.waiting_category)
     await callback.message.answer("Выберите категорию:", reply_markup=_category_keyboard())
     await callback.answer()
@@ -362,6 +523,18 @@ async def on_ocr_category_menu(callback: CallbackQuery, state: FSMContext) -> No
 async def on_ocr_category_pick(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message is None:
         await callback.answer()
+        return
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if not isinstance(user_id, int):
+        await callback.answer("Нет данных для подтверждения.", show_alert=True)
+        return
+    db = _get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None or not user.is_active:
+        await state.clear()
+        await callback.message.answer(_pending_access_text())
+        await callback.answer("Not active", show_alert=True)
         return
     category = callback.data[len(_CB_OCR_CATEGORY_PREFIX) :] if callback.data else ""
     if category not in _CATEGORIES:
@@ -388,6 +561,14 @@ async def on_ocr_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     if not isinstance(user_id, int):
         await callback.answer("Нет данных для подтверждения.", show_alert=True)
         return
+
+    db = _get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None or not user.is_active:
+        await state.clear()
+        await callback.message.answer(_pending_access_text())
+        await callback.answer("Not active", show_alert=True)
+        return
     if amount_raw is None:
         await callback.answer("Сумма не указана. Нажмите «Изменить сумму».", show_alert=True)
         return
@@ -398,7 +579,6 @@ async def on_ocr_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Некорректная сумма. Нажмите «Изменить сумму».", show_alert=True)
         return
 
-    db = _get_db()
     await db.add_transaction(
         user_id=user_id,
         amount=decimal_amount,
@@ -427,6 +607,20 @@ async def on_text(message: Message, state: FSMContext) -> None:
     if not text or text.startswith("/"):
         return
 
+    if message.from_user is None:
+        await message.answer("Не удалось определить пользователя Telegram.")
+        return
+
+    db = _get_db()
+    user_result = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+    )
+    if not user_result.user.is_active:
+        await state.clear()
+        await message.answer(_pending_access_text())
+        return
+
     # FSM: ручной ввод суммы для OCR-подтверждения
     current_state = await state.get_state()
     if current_state == ReceiptStates.waiting_manual_amount.state:
@@ -450,14 +644,6 @@ async def on_text(message: Message, state: FSMContext) -> None:
 
     amount = _parse_amount_from_text(text)
     if amount is not None:
-        if message.from_user is None:
-            await message.answer("Не удалось определить пользователя Telegram.")
-            return
-        db = _get_db()
-        user_result = await db.get_or_create_user(
-            telegram_id=message.from_user.id,
-            username=message.from_user.username,
-        )
         await db.add_transaction(
             user_id=user_result.user.id,
             amount=amount,
@@ -525,9 +711,11 @@ async def on_stats_month(callback: CallbackQuery) -> None:
 
 async def main() -> None:
     global _db
+    global _admin_id
 
     cfg = get_config()
-    _db = Database(cfg.database_url)
+    _admin_id = cfg.admin_id
+    _db = Database(cfg.database_url, admin_telegram_id=cfg.admin_id)
     await _db.init_models()
     logger.info("База данных инициализирована.")
 

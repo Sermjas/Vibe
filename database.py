@@ -9,6 +9,7 @@ from decimal import Decimal
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, JSON, Numeric, String, func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
+    AsyncConnection,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -32,6 +33,8 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Признак администратора (используется для /admin).
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Статус доступа пользователя: False = ожидание подтверждения (модерация).
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reg_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -75,11 +78,13 @@ class UserUpsertResult:
 class Database:
     """Сервис работы с БД."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, admin_telegram_id: int) -> None:
         self._engine: AsyncEngine = create_async_engine(database_url, echo=False)
         self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
+        # Telegram ID главного администратора из .env (ADMIN_ID).
+        self._admin_telegram_id = admin_telegram_id
 
     async def init_models(self) -> None:
         """Создаёт таблицы, если их ещё нет.
@@ -90,20 +95,80 @@ class Database:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
+            # Минимальная "ручная миграция" для SQLite: добавляем недостающие колонки.
+            # Это нужно, чтобы проект мог работать на уже существующем `bot.db`.
+            if self._engine.dialect.name == "sqlite":
+                await self._ensure_sqlite_columns(conn)
+
+    async def _ensure_sqlite_columns(self, conn: AsyncConnection) -> None:
+        """Добавляет отсутствующие колонки в SQLite таблицы (ALTER TABLE)."""
+
+        async def column_exists(table: str, column: str) -> bool:
+            result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            rows = result.fetchall()
+            # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+            return any(str(r[1]) == column for r in rows)
+
+        async def add_column(
+            table: str, column: str, ddl: str
+        ) -> None:
+            if await column_exists(table, column):
+                return
+            await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+        # users: is_admin / is_active
+        await add_column(
+            "users",
+            "is_admin",
+            "is_admin BOOLEAN NOT NULL DEFAULT 0",
+        )
+        await add_column(
+            "users",
+            "is_active",
+            "is_active BOOLEAN NOT NULL DEFAULT 0",
+        )
+
+        # transactions: category / raw_data
+        await add_column(
+            "transactions",
+            "category",
+            "category VARCHAR(64)",
+        )
+        await add_column(
+            "transactions",
+            "raw_data",
+            # JSON в SQLite может храниться как TEXT.
+            "raw_data TEXT",
+        )
+
     async def get_or_create_user(
         self, telegram_id: int, username: str | None
     ) -> UserUpsertResult:
         """Возвращает пользователя по telegram_id или создаёт нового."""
+        is_admin_user = telegram_id == self._admin_telegram_id
         async with self._session_factory() as session:
             stmt = select(User).where(User.telegram_id == telegram_id)
             existing = await session.scalar(stmt)
             if existing is not None:
+                should_commit = False
                 if existing.username != username:
                     existing.username = username
+                    should_commit = True
+                # Админ всегда получает полные права и активный доступ.
+                if is_admin_user and (not existing.is_admin or not existing.is_active):
+                    existing.is_admin = True
+                    existing.is_active = True
+                    should_commit = True
+                if should_commit:
                     await session.commit()
                 return UserUpsertResult(user=existing, created=False)
 
-            user = User(telegram_id=telegram_id, username=username)
+            user = User(
+                telegram_id=telegram_id,
+                username=username,
+                is_admin=is_admin_user,
+                is_active=True if is_admin_user else False,
+            )
             session.add(user)
             await session.commit()
             await session.refresh(user)
@@ -182,4 +247,43 @@ class Database:
                 stmt = stmt.limit(limit)
             rows = await session.scalars(stmt)
             return list(rows.all())
+
+    async def get_user_by_id(self, user_id: int) -> User | None:
+        """Получает пользователя по внутреннему id БД."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.id == user_id)
+            return await session.scalar(stmt)
+
+    async def set_user_active_by_telegram_id(
+        self, telegram_id: int, is_active: bool
+    ) -> None:
+        """Обновляет статус доступа пользователя (для модерации)."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            user = await session.scalar(stmt)
+            if user is None:
+                return
+            user.is_active = is_active
+            await session.commit()
+
+    async def get_admin_users(self) -> list[User]:
+        """Возвращает всех админов."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.is_admin.is_(True))
+            rows = await session.scalars(stmt)
+            return list(rows.all())
+
+    async def check_user_limit(self, user_id: int) -> int:
+        """Считает успешные OCR-транзакции пользователя за текущие сутки (UTC)."""
+        async with self._session_factory() as session:
+            now = datetime.now(timezone.utc)
+            day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            stmt = select(func.count(Transaction.id)).where(
+                Transaction.user_id == user_id,
+                Transaction.created_at >= day_start,
+                Transaction.created_at < day_end,
+            )
+            value = await session.scalar(stmt)
+            return int(value or 0)
 
