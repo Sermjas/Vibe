@@ -15,6 +15,7 @@ class AppConfig:
     telegram_bot_token: str
     gemini_api_key: str
     database_url: str
+    # Строго целочисленный Telegram user id администратора (из .env).
     admin_id: int
 
 

@@ -287,3 +287,16 @@ class Database:
             value = await session.scalar(stmt)
             return int(value or 0)
 
+    async def get_all_transactions_with_telegram_ids(
+        self,
+    ) -> list[tuple[Transaction, int]]:
+        """Все транзакции с telegram_id владельца (для админ-экспорта), свежие сверху."""
+        async with self._session_factory() as session:
+            stmt = (
+                select(Transaction, User.telegram_id)
+                .join(User, Transaction.user_id == User.id)
+                .order_by(Transaction.created_at.desc())
+            )
+            result = await session.execute(stmt)
+            return [(row[0], int(row[1])) for row in result.all()]
+
