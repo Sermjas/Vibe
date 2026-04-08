@@ -1,11 +1,12 @@
-"""Загрузка настроек из переменных окружения (.env)."""
+"""Загрузка настроек из переменных окружения (.env, .env.local)."""
 
 from dataclasses import dataclass
 import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(".env")
+load_dotenv(".env.local", override=True)
 
 
 @dataclass(frozen=True)

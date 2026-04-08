@@ -79,7 +79,12 @@ class Database:
     """Сервис работы с БД."""
 
     def __init__(self, database_url: str, admin_telegram_id: int) -> None:
-        self._engine: AsyncEngine = create_async_engine(database_url, echo=False)
+        self._engine: AsyncEngine = create_async_engine(
+            database_url,
+            echo=False,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
         self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine, expire_on_commit=False
         )

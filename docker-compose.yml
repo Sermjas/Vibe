@@ -1,8 +1,11 @@
 services:
   vibe_bot:
     build: .
-    restart: always
+    restart: unless-stopped
     env_file:
-      - .env
+      - .env.docker
     volumes:
-      - ./data:/app/data  
+      - vibe_data:/app/data
+
+volumes:
+  vibe_data:

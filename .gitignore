@@ -1,4 +1,10 @@
 .env
+.env.local
+.env.docker
+.env.*
+!.env.example
+!.env.local.example
+!.env.docker.example
 __pycache__/
 temp/
 .env
