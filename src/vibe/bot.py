@@ -837,7 +837,7 @@ async def main() -> None:
     )
 
     _admin_id = cfg.admin_id
-    _db = Database(cfg.resolved_database_url, admin_telegram_id=cfg.admin_id)
+    _db = Database(cfg.database_path, admin_telegram_id=cfg.admin_id)
     await _db.init_models()
     logger.info("База данных инициализирована.")
 

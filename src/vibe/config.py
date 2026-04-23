@@ -25,18 +25,26 @@ class AppConfig(BaseSettings):
     telegram_bot_token: str = Field(min_length=1)
     gemini_api_key: str = Field(min_length=1)
     admin_id: int
-    data_dir: str = "/app/data"
-    database_url: str | None = None
+    # Путь к SQLite файлу в volume Docker. По умолчанию: /app/data/bot.db
+    database_path: str = Field(default="/app/data/bot.db", validation_alias="DATABASE_PATH")
+    database_url: str | None = None  # оставляем для обратной совместимости
     log_level: str = "INFO"
     log_path: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def resolved_database_url(self) -> str:
-        """Возвращает итоговый DATABASE_URL с безопасным дефолтом для Docker."""
+        """Возвращает итоговый SQLAlchemy URL.
+
+        Приоритет:
+        1) DATABASE_URL (если задан) — для внешних БД
+        2) DATABASE_PATH (SQLite файл) — основной путь для Docker volume
+        """
         if self.database_url and self.database_url.strip():
             return self.database_url.strip()
-        return f"sqlite+aiosqlite:////{self.data_dir.strip('/')}/bot.db"
+        path = (self.database_path or "/app/data/bot.db").strip()
+        # Для SQLite в SQLAlchemy путь должен быть абсолютным: sqlite+aiosqlite:////abs/path.db
+        return f"sqlite+aiosqlite:////{path.lstrip('/')}"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -44,7 +52,9 @@ class AppConfig(BaseSettings):
         """Возвращает путь до файла логов в каталоге данных."""
         if self.log_path and self.log_path.strip():
             return self.log_path.strip()
-        return f"{self.data_dir.rstrip('/')}/bot.log"
+        # Логи по умолчанию рядом с базой (в каталоге volume).
+        base_dir = "/".join((self.database_path or "/app/data/bot.db").split("/")[:-1]) or "/app/data"
+        return f"{base_dir.rstrip('/')}/bot.log"
 
 
 @lru_cache(maxsize=1)
