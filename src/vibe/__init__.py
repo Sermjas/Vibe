@@ -1,0 +1,2 @@
+"""Vibe bot package."""
+
