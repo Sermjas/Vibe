@@ -6,6 +6,11 @@
 - bot.py ✅ (/start с регистрацией, OCR из памяти, **подтверждение перед записью**, FSM, inline-статистика, /admin, /export, логи в bot.log)
 - database.py ✅ (SQLAlchemy 2.0 async + aiosqlite, модели User/Transaction, **is_admin**, category/raw_data, запросы админки, экспорта и лимитов)
 
+### Экспорт в Excel
+- В меню статистики добавлена кнопка `📥 Export to Excel`.
+- Экспорт формируется в памяти (`BytesIO`) через `pandas` + `openpyxl`, без временных файлов на диске.
+- Имя файла: `report_DATE.xlsx` (дата в UTC).
+
 ## 🏗 Архитектура проекта
 /project
   config.py           # Конфигурация, dotenv, загрузка токенов

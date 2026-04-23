@@ -238,18 +238,14 @@ class Database:
             value = await session.scalar(stmt)
             return Decimal(str(value or 0))
 
-    async def get_user_transactions(
-        self, user_id: int, limit: int | None = None
-    ) -> list[Transaction]:
-        """Возвращает транзакции пользователя (свежие сверху)."""
+    async def get_user_transactions(self, user_id: int) -> list[Transaction]:
+        """Возвращает все транзакции пользователя (свежие сверху)."""
         async with self._session_factory() as session:
             stmt = (
                 select(Transaction)
                 .where(Transaction.user_id == user_id)
                 .order_by(Transaction.created_at.desc())
             )
-            if limit is not None:
-                stmt = stmt.limit(limit)
             rows = await session.scalars(stmt)
             return list(rows.all())
 

@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pandas as pd
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -59,6 +60,7 @@ _CB_OCR_CATEGORY_PREFIX = "ocr:category:"
 _CB_MOD_APPROVE = "mod:approve:"
 _CB_MOD_BLOCK = "mod:block:"
 _CB_STATS_CSV = "stats:csv"
+_CB_STATS_EXCEL = "stats:excel"
 
 _CATEGORIES: list[str] = [
     "Продукты",
@@ -193,7 +195,8 @@ def _get_admin_id() -> int:
 def _stats_csv_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Скачать CSV", callback_data=_CB_STATS_CSV)]
+            [InlineKeyboardButton(text="📥 Скачать CSV", callback_data=_CB_STATS_CSV)],
+            [InlineKeyboardButton(text="📥 Export to Excel", callback_data=_CB_STATS_EXCEL)],
         ]
     )
 
@@ -290,6 +293,33 @@ def _user_csv_bytes(txs: list) -> tuple[bytes, str]:
         )
     data = output.getvalue().encode("utf-8-sig")
     return data, "my_transactions.csv"
+
+
+def _user_excel_bytes(txs: list) -> tuple[bytes, str]:
+    """Генерация Excel-файла в памяти через pandas и openpyxl."""
+    # Формируем таблицу для отчёта в UTC, чтобы исключить разночтения по часовым поясам.
+    table_rows = [
+        {
+            "created_at_utc": tx.created_at.astimezone(timezone.utc).isoformat(),
+            "amount": float(tx.amount),
+            "category": tx.category or "",
+            "telegram_file_id": tx.telegram_file_id or "",
+        }
+        for tx in txs
+    ]
+    frame = pd.DataFrame(
+        table_rows,
+        columns=["created_at_utc", "amount", "category", "telegram_file_id"],
+    )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        frame.to_excel(writer, sheet_name="Отчёт", index=False)
+    output.seek(0)
+
+    report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filename = f"report_{report_date}.xlsx"
+    return output.getvalue(), filename
 
 
 @router.message(CommandStart())
@@ -677,6 +707,34 @@ async def on_stats_csv(callback: CallbackQuery) -> None:
     data, filename = _user_csv_bytes(txs)
     await callback.message.answer_document(BufferedInputFile(data, filename=filename))
     await callback.answer()
+
+
+@router.callback_query(F.data == _CB_STATS_EXCEL)
+async def on_stats_excel(callback: CallbackQuery, bot: Bot) -> None:
+    """Экспорт транзакций пользователя в Excel-файл."""
+    if callback.message is None:
+        await callback.answer()
+        return
+    if callback.from_user is None:
+        await callback.answer("Пользователь не определён.", show_alert=True)
+        return
+
+    db = _get_db()
+    user_result = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+    )
+    txs = await db.get_user_transactions(user_result.user.id)
+    if not txs:
+        await callback.answer("Нет транзакций для выгрузки.", show_alert=True)
+        return
+
+    data, filename = _user_excel_bytes(txs)
+    await bot.send_document(
+        chat_id=callback.message.chat.id,
+        document=BufferedInputFile(data, filename=filename),
+    )
+    await callback.answer("Excel-отчёт отправлен.")
 
 
 @router.message(F.text == "📸 Сканировать чек")
