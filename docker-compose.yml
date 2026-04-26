@@ -22,5 +22,26 @@ services:
       - vibe_data:/app/data
       - /etc/localtime:/etc/localtime:ro
 
+  # Отдельный infra-сервис. Не связан с бизнес-логикой бота.
+  # Вариант для запуска ВНУТРИ Compose требует:
+  # - доступа к Docker сокету (для prune)
+  # - корректного пути для проверки диска (обычно "/" на хосте; можно смонтировать хостовый FS и проверять его)
+  disk_monitor:
+    build: .
+    container_name: vibe_disk_monitor
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    command: ["python", "-m", "vibe.infra.disk_monitor"]
+    volumes:
+      - vibe_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+    # Если хотите мониторить именно хостовую файловую систему, добавьте bind-mount, например:
+    # - /:/host:ro
+    # и установите DISK_MONITOR_PATH=/host
+    mem_limit: 128m
+    cpus: 0.2
+
 volumes:
   vibe_data:
