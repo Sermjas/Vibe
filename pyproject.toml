@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 vibe-bot = "vibe.bot:run"
+vibe-disk-monitor = "vibe.infra.disk_monitor:run"
 
 [project.optional-dependencies]
 dev = [
