@@ -31,6 +31,10 @@ from loguru import logger
 from vibe.config import get_config
 from vibe.database import Database
 from vibe.ocr_service import OCR_RATE_LIMIT_ERROR, get_amount_from_checkpoint
+from vibe.payments.handlers import bind_db as bind_payments_db
+from vibe.payments.handlers import router as payments_router
+from vibe.payments.middleware import SubscriptionMiddleware
+from vibe.payments.service import run_payment_poller
 
 router = Router()
 
@@ -840,11 +844,16 @@ async def main() -> None:
     _db = Database(cfg.database_path, admin_telegram_id=cfg.admin_id)
     await _db.init_models()
     logger.info("База данных инициализирована.")
+    bind_payments_db(_db)
 
     bot = Bot(token=cfg.telegram_bot_token)
     dp = Dispatcher(storage=MemoryStorage())
+    dp.message.middleware(SubscriptionMiddleware(_db))
+    dp.callback_query.middleware(SubscriptionMiddleware(_db))
+    dp.include_router(payments_router)
     dp.include_router(router)
     logger.info("Бот запущен, ожидание апдейтов…")
+    poller_task = asyncio.create_task(run_payment_poller(_db, cfg))
     try:
         await dp.start_polling(bot)
     except TelegramUnauthorizedError:
@@ -853,6 +862,12 @@ async def main() -> None:
             "токен должен быть действительным бот-токеном от @BotFather, без лишних пробелов."
         )
         raise
+    finally:
+        poller_task.cancel()
+        try:
+            await poller_task
+        except asyncio.CancelledError:
+            pass
 
 
 def run() -> None:

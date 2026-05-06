@@ -75,6 +75,44 @@ class Transaction(Base):
     user: Mapped[User] = relationship(back_populates="transactions")
 
 
+class Subscription(Base):
+    """Подписка пользователя (доступ к платным функциям)."""
+
+    __tablename__ = "subscriptions"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    subscription_end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class Payment(Base):
+    """Платёж YooKassa (для polling и выдачи подписки)."""
+
+    __tablename__ = "payments"
+
+    payment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 @dataclass(frozen=True)
 class UserUpsertResult:
     """Результат поиска/создания пользователя."""
@@ -297,3 +335,115 @@ class Database:
             )
             result = await session.execute(stmt)
             return [(row[0], int(row[1])) for row in result.all()]
+
+    # --- Подписки ---
+
+    async def get_subscription(self, telegram_id: int) -> Subscription | None:
+        async with self._session_factory() as session:
+            stmt = select(Subscription).where(Subscription.telegram_id == telegram_id)
+            return await session.scalar(stmt)
+
+    async def upsert_subscription(
+        self,
+        *,
+        telegram_id: int,
+        subscription_end_date: datetime | None,
+        is_active: bool,
+    ) -> None:
+        async with self._session_factory() as session:
+            stmt = select(Subscription).where(Subscription.telegram_id == telegram_id)
+            existing = await session.scalar(stmt)
+            now = datetime.now(timezone.utc)
+            if existing is None:
+                session.add(
+                    Subscription(
+                        telegram_id=telegram_id,
+                        subscription_end_date=subscription_end_date,
+                        is_active=is_active,
+                        updated_at=now,
+                    )
+                )
+                await session.commit()
+                return
+
+            existing.subscription_end_date = subscription_end_date
+            existing.is_active = is_active
+            existing.updated_at = now
+            await session.commit()
+
+    # --- Платежи ---
+
+    async def create_payment(
+        self,
+        *,
+        payment_id: str,
+        telegram_id: int,
+        amount: Decimal,
+        status: str,
+        processed: bool,
+        raw: dict | None,
+    ) -> None:
+        async with self._session_factory() as session:
+            stmt = select(Payment).where(Payment.payment_id == payment_id)
+            existing = await session.scalar(stmt)
+            now = datetime.now(timezone.utc)
+            if existing is not None:
+                existing.telegram_id = telegram_id
+                existing.amount = amount
+                existing.status = status
+                existing.processed = processed
+                existing.raw = raw
+                existing.updated_at = now
+                await session.commit()
+                return
+
+            session.add(
+                Payment(
+                    payment_id=payment_id,
+                    telegram_id=telegram_id,
+                    amount=amount,
+                    status=status,
+                    processed=processed,
+                    raw=raw,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+    async def get_payment(self, payment_id: str) -> Payment | None:
+        async with self._session_factory() as session:
+            stmt = select(Payment).where(Payment.payment_id == payment_id)
+            return await session.scalar(stmt)
+
+    async def update_payment(self, *, payment_id: str, status: str, raw: dict | None) -> None:
+        async with self._session_factory() as session:
+            stmt = select(Payment).where(Payment.payment_id == payment_id)
+            existing = await session.scalar(stmt)
+            if existing is None:
+                return
+            existing.status = status
+            existing.raw = raw
+            existing.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    async def mark_payment_processed(self, payment_id: str) -> None:
+        async with self._session_factory() as session:
+            stmt = select(Payment).where(Payment.payment_id == payment_id)
+            existing = await session.scalar(stmt)
+            if existing is None:
+                return
+            existing.processed = True
+            existing.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    async def get_unprocessed_payments(self, *, limit: int = 50) -> list[Payment]:
+        async with self._session_factory() as session:
+            stmt = (
+                select(Payment)
+                .where(Payment.processed.is_(False))
+                .order_by(Payment.created_at.asc())
+                .limit(limit)
+            )
+            rows = await session.scalars(stmt)
+            return list(rows.all())

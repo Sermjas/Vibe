@@ -67,6 +67,12 @@ class AppConfig(BaseSettings):
     log_level: str = "INFO"
     log_path: str | None = None
 
+    # --- Платежи YooKassa ---
+    # Делаем необязательными, чтобы бот мог стартовать без платежей (например, в dev),
+    # а ошибки показывались только при попытке /buy.
+    yookassa_shop_id: str | None = Field(default=None, validation_alias="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: str | None = Field(default=None, validation_alias="YOOKASSA_SECRET_KEY")
+
     # --- Инфраструктура / мониторинг диска Docker-хоста ---
     disk_monitor_path: str = Field(default="/", validation_alias="DISK_MONITOR_PATH")
     disk_warn_percent: float = Field(default=20.0, validation_alias="DISK_WARN_PERCENT")
