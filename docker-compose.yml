@@ -19,7 +19,7 @@ services:
         max-size: "5m"
         max-file: "1"
     volumes:
-      - vibe_data:/app/data
+      - vibe_db_data:/app/data
       - /etc/localtime:/etc/localtime:ro
 
   # Отдельный infra-сервис. Не связан с бизнес-логикой бота.
@@ -34,9 +34,10 @@ services:
       - .env.docker
     command: ["python", "-m", "vibe.infra.disk_monitor"]
     volumes:
-      - vibe_data:/app/data
+      - vibe_db_data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro
+
     # Если хотите мониторить именно хостовую файловую систему, добавьте bind-mount, например:
     # - /:/host:ro
     # и установите DISK_MONITOR_PATH=/host
@@ -44,4 +45,4 @@ services:
     cpus: 0.2
 
 volumes:
-  vibe_data:
+  vibe_db_data:
