@@ -18,6 +18,10 @@ dependencies = [
     "loguru>=0.7.2",
 ]
 
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project.scripts]
 vibe-bot = "vibe.bot:run"
 vibe-disk-monitor = "vibe.infra.disk_monitor:run"
@@ -42,3 +46,9 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
