@@ -124,10 +124,11 @@ class UserUpsertResult:
 class Database:
     """Сервис работы с БД."""
 
-    def __init__(self, database_path: str, admin_telegram_id: int) -> None:
-        self._database_path = database_path
+    def __init__(self, database_url: str, admin_telegram_id: int) -> None:
+        """`database_url` — итоговый SQLAlchemy URL (см. `AppConfig.resolved_database_url`)."""
+        self._database_url = database_url.strip()
         self._engine: AsyncEngine = create_async_engine(
-            self._database_url_from_path(database_path),
+            self._database_url,
             echo=False,
             pool_pre_ping=True,
             pool_recycle=1800,
@@ -139,11 +140,6 @@ class Database:
         # Telegram ID главного администратора из .env (ADMIN_ID).
         self._admin_telegram_id = admin_telegram_id
 
-    @staticmethod
-    def _database_url_from_path(database_path: str) -> str:
-        path = (database_path or "/app/data/bot.db").strip()
-        return f"sqlite+aiosqlite:////{path.lstrip('/')}"
-
     async def init_models(self) -> None:
         """Создаёт таблицы, если их ещё нет.
 
@@ -151,8 +147,9 @@ class Database:
         без новых колонок, потребуется пересоздание/миграция вне этого кода.
         """
         async with self._engine.begin() as conn:
-            # ВАЖНО: включаем WAL сразу после открытия соединения, чтобы избежать блокировок в Docker.
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+            # WAL только для SQLite (в Docker снижает блокировки).
+            if self._engine.dialect.name == "sqlite":
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
             await conn.run_sync(Base.metadata.create_all)
 
             # Минимальная "ручная миграция" для SQLite: добавляем недостающие колонки.

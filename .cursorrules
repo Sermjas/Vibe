@@ -1,17 +1,44 @@
-# Стек технологий
-- Используй Python 3.10+ и библиотеку aiogram версии 3.x.
-- Для распознавания текста (OCR) используй Google Gemini API через библиотеку google-genai (`genai.Client`).
+---
+description: 
+alwaysApply: true
+---
 
-# Архитектура
-- Строго разделяй логику: bot.py (интерфейс), ocr_service.py (обработка фото), config.py (настройки).
-- Никакой бизнес-логики или работы с данными в файле bot.py.
+---
+description: 
+alwaysApply: true
+---
 
-# Стиль кода
-- Все комментарии, логи и сообщения для пользователя пиши только на русском языке.
-- Используй f-строки для форматирования текста.
-- Применяй аннотации типов (type hinting).
+# Technology stack
+- Use Python 3.10+ and the aiogram library version 3.x.
+- For text recognition (OCR), use the Google Gemini API through the google-genai library (`genai.Client`).
 
-# Обработка ошибок
-- Если сумма на чеке не найдена, всегда проси пользователя переснять фото, а не пытайся угадать число.
+# Architecture
+- Strictly separate the logic: vibe/bot.py (interface), vibe/ocr_service.py (photo processing), vibe/config.py (settings).
+- No business logic or data handling in the bot.py file.
 
-Все секретные ключи (Token, API Key) должны загружаться строго из файла .env. В config.py используй python-dotenv
+# Code style
+- Write all comments, logs, and messages to the user only in Russian.
+- Use f-strings for text formatting.
+- Use type annotations (type hinting).
+
+# Error handling
+- If the amount on the check is not found, always ask the user to take a new photo instead of trying to guess the number.
+
+#Answer
+- ALWAYS answer the user only in Russian, including:
+- explanations
+- code comments
+- error messages
+- documentation
+- commit messages
+- README
+- chat responses
+- hints
+- plans and instructions
+
+Use English ONLY:
+- inside the code
+- in the names of libraries, APIs, variables, and commands
+- if the user explicitly requested a response in another language.
+
+ All secret keys (Token, API Key) should be loaded strictly from the .env file via pydantic-settings (vibe/config.py, env_file).

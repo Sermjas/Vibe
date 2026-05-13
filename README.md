@@ -17,28 +17,55 @@
 - **AI**: `google-genai` (Gemini API)
 - **DB**: `SQLAlchemy 2.0` + `aiosqlite` (SQLite, WAL)
 - **Reports**: `pandas` + `openpyxl`
-- **Settings**: `pydantic-settings` (+ `python-dotenv` для `.env`)
+- **Settings**: `pydantic-settings` (чтение `.env` / `.env.local` через `env_file`)
 - **Logging**: `loguru`
 
 ## 🏗 Архитектура проекта
 ```text
 /project
-  ├── src/vibe/                 # Основной пакет приложения
+  ├── vibe/                     # пакет приложения в корне репозитория
   │   ├── bot.py                # aiogram 3.x: интерфейс/хэндлеры, entrypoint
   │   ├── config.py             # pydantic-settings конфигурация
   │   ├── database.py           # SQLAlchemy async слой БД (SQLite WAL)
-  │   └── ocr_service.py        # Gemini OCR + предобработка
-  ├── bot.py                    # совместимая обёртка (реэкспорт из src/vibe)
-  ├── config.py                 # совместимая обёртка
-  ├── database.py               # совместимая обёртка
-  ├── ocr_service.py            # совместимая обёртка
-  ├── docker-compose.yml         # запуск в Docker (volume /app/data)
-  ├── Dockerfile                # multi-stage, non-root, PYTHONPATH=/app/src
-  ├── pyproject.toml            # зависимости + ruff
+  │   ├── ocr_service.py        # Gemini OCR + предобработка
+  │   ├── infra/                # disk_monitor, уведомления
+  │   └── payments/             # YooKassa, подписка
+  ├── docker-compose.yml        # запуск в Docker (volume /app/data)
+  ├── Dockerfile                # multi-stage, non-root, PYTHONPATH=/app
+  ├── pyproject.toml            # зависимости, entry points: vibe-bot, vibe-disk-monitor
   ├── requirements.txt          # зависимости для Docker build
-  ├── tests/                    # тесты (каркас)
-  └── docs/context.md           # контекст и решения проекта
+  ├── tests/
+  └── docs/context.md
 ```
+
+## 💻 Локальный запуск (без Docker)
+
+1. Создайте виртуальное окружение и установите проект в editable-режиме (пакет `vibe` в каталоге `vibe/`):
+
+```bash
+python -m venv .venv
+# Windows: .\.venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+pip install -e .
+```
+
+2. Скопируйте `.env.example` в `.env` (и при необходимости `.env.local`) и задайте секреты.
+
+3. Запуск бота — любой из вариантов:
+
+```bash
+vibe-bot
+```
+
+или
+
+```bash
+python -m vibe.bot
+```
+
+Команда должна выполняться **из корня репозитория** (чтобы находились `.env` / `.env.local`).
+
+**Без `pip install -e .`:** задайте `PYTHONPATH=.` (текущий каталог — корень репозитория) и затем `python -m vibe.bot` (на Windows PowerShell: `$env:PYTHONPATH = "."`).
 
 ## ⚙️ Переменные окружения
 См. `.env.example` (также есть `.env.local.example` и `.env.docker.example`).
@@ -49,7 +76,8 @@
 - `ADMIN_ID`
 
 База данных:
-- `DATABASE_PATH` — путь к файлу SQLite (по умолчанию: `/app/data/bot.db`)
+- `DATABASE_URL` — полный SQLAlchemy URL (если задан, имеет приоритет над путём к файлу)
+- `DATABASE_PATH` — путь к файлу SQLite (по умолчанию: `/app/data/bot.db`), если `DATABASE_URL` не задан
 
 Логи:
 - `LOG_LEVEL` (по умолчанию: `INFO`)
@@ -64,6 +92,8 @@ docker-compose up -d --build
 ```
 
 Данные и база `bot.db` хранятся в volume, смонтированном в `/app/data`.
+
+Сервис `disk_monitor` по умолчанию работает в **режиме демона** (проверка раз в `DISK_MONITOR_INTERVAL_SEC`, минимум 60 с). Для однократного запуска из cron: `command: ["python", "-m", "vibe.infra.disk_monitor", "--once"]`.
 
 ## 🚀 Деплой на VPS (GitHub Actions)
 Workflow: `.github/workflows/deploy.yml` (триггер на push в `main`).

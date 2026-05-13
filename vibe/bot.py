@@ -186,6 +186,18 @@ def _get_admin_id() -> int:
     return _admin_id
 
 
+async def _answer_admin_panel(message: Message) -> None:
+    """Текст админ-панели (общий для /admin и кнопки меню)."""
+    db = _get_db()
+    users_count = await db.get_users_count()
+    today_sum = await db.get_today_total_sum()
+    await message.answer(
+        "Админ-панель:\n"
+        f"- Пользователей: {users_count}\n"
+        f"- Сумма транзакций за сегодня (UTC): {_format_amount(today_sum)} руб."
+    )
+
+
 def _stats_csv_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -428,14 +440,7 @@ async def cmd_admin(message: Message) -> None:
         await message.answer("Доступ запрещён.")
         return
 
-    db = _get_db()
-    users_count = await db.get_users_count()
-    today_sum = await db.get_today_total_sum()
-    await message.answer(
-        "Админ-панель:\n"
-        f"- Пользователей: {users_count}\n"
-        f"- Сумма транзакций за сегодня (UTC): {_format_amount(today_sum)} руб."
-    )
+    await _answer_admin_panel(message)
 
 
 @router.message(F.photo)
@@ -734,14 +739,7 @@ async def on_support(message: Message) -> None:
 
 @router.message(IsAdmin(), F.text == "🛡 Админ-панель")
 async def on_admin_panel(message: Message) -> None:
-    db = _get_db()
-    users_count = await db.get_users_count()
-    today_sum = await db.get_today_total_sum()
-    await message.answer(
-        "Админ-панель:\n"
-        f"- Пользователей: {users_count}\n"
-        f"- Сумма транзакций за сегодня (UTC): {_format_amount(today_sum)} руб."
-    )
+    await _answer_admin_panel(message)
 
 
 @router.message(IsAdmin(), F.text == "📥 Экспорт всей БД")
@@ -804,18 +802,37 @@ async def on_text(message: Message, state: FSMContext) -> None:
 
     amount = _parse_amount_from_text(text)
     if amount is not None:
-        await db.add_transaction(
+        # Как и для фото: сначала подтверждение; лимит 3 записи/сутки (UTC), админ без лимита.
+        if message.from_user.id != _get_admin_id():
+            used_today = await db.check_user_limit(user_result.user.id)
+            if used_today >= 3:
+                await message.answer(
+                    "Ваш дневной лимит (3 чека) исчерпан. Пожалуйста, возвращайтесь завтра!"
+                )
+                return
+        await state.set_state(OCRState.confirming)
+        await state.update_data(
             user_id=user_result.user.id,
-            amount=amount,
             telegram_file_id=None,
-            category=None,
-            raw_data=None,
+            amount=str(amount),
+            category="Другое",
+            raw_data={"source": "manual_text", "input": text},
         )
-        logger.info(f"Ручной ввод суммы: user_id={user_result.user.id} amount={amount}")
-        await message.answer(f"Расход записан: {_format_amount(amount)} руб.")
+        logger.info(
+            "Ручной ввод суммы (ожидание подтверждения): "
+            f"user_id={user_result.user.id} amount={amount}"
+        )
+        await message.answer(
+            "Вы ввели сумму вручную:\n"
+            f"- Сумма: {_format_amount(amount)}\n"
+            "- Категория: Другое\n"
+            "\n"
+            "Подтвердите сохранение или измените данные.",
+            reply_markup=_receipt_confirm_keyboard(),
+        )
         return
 
-    await message.answer("Я не понял это сообщение")
+    await message.answer("Я не понял это сообщение. Используйте кнопки меню или пришлите фото чека.")
 
 
 async def main() -> None:
@@ -841,7 +858,7 @@ async def main() -> None:
     )
 
     _admin_id = cfg.admin_id
-    _db = Database(cfg.database_path, admin_telegram_id=cfg.admin_id)
+    _db = Database(cfg.resolved_database_url, admin_telegram_id=cfg.admin_id)
     await _db.init_models()
     logger.info("База данных инициализирована.")
     bind_payments_db(_db)

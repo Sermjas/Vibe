@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import asyncio
+import json
 import shutil
 import subprocess
 import sys
@@ -70,12 +70,12 @@ def _run_cmd(cmd: list[str]) -> tuple[int, str]:
     return p.returncode, out
 
 
-def docker_cleanup(*, include_volumes: bool) -> None:
+async def docker_cleanup_async(*, include_volumes: bool) -> None:
     # Важно: это maintenance задача, не часть бизнес-логики бота.
     base = ["docker", "system", "prune", "-af"]
     if include_volumes:
         base.append("--volumes")
-    rc, _ = _run_cmd(base)
+    rc, _ = await asyncio.to_thread(_run_cmd, base)
     if rc != 0:
         raise RuntimeError("docker system prune завершился с ошибкой")
 
@@ -129,7 +129,11 @@ async def run_once(*, dry_run: bool = False) -> int:
     should_notify = level in {"warning", "critical"} and level != last_level
 
     if should_notify:
-        header = "⚠️ Предупреждение: заканчивается место на диске" if level == "warning" else "🚨 Критично: почти нет места на диске"
+        header = (
+            "⚠️ Предупреждение: заканчивается место на диске"
+            if level == "warning"
+            else "🚨 Критично: почти нет места на диске"
+        )
         text = (
             f"{header}\n"
             f"Путь: {status.path}\n"
@@ -156,7 +160,7 @@ async def run_once(*, dry_run: bool = False) -> int:
         else:
             logger.warning("Свободного места < порога. Запускаю очистку Docker.")
             try:
-                docker_cleanup(include_volumes=include_volumes)
+                await docker_cleanup_async(include_volumes=include_volumes)
                 state["last_cleanup_at"] = _now_iso()
                 state["last_cleanup_ok"] = True
                 logger.info("Очистка Docker завершена успешно.")
@@ -169,6 +173,22 @@ async def run_once(*, dry_run: bool = False) -> int:
     state["last_level"] = level
     _write_state(state_file, state)
     return 0
+
+
+async def run_daemon(*, dry_run: bool) -> None:
+    """Бесконечный цикл проверок (для docker-compose с restart: unless-stopped)."""
+    cfg = get_config()
+    interval = float(getattr(cfg, "disk_monitor_interval_sec", 3600.0))
+    logger.info(f"disk_monitor: режим демона, интервал {interval:.0f} с между проверками.")
+    while True:
+        try:
+            await run_once(dry_run=dry_run)
+        except asyncio.CancelledError:
+            logger.info("disk_monitor: остановка.")
+            raise
+        except Exception:
+            logger.exception("Ошибка итерации disk_monitor")
+        await asyncio.sleep(interval)
 
 
 def _configure_logging(log_path: str | None) -> None:
@@ -188,8 +208,19 @@ def _configure_logging(log_path: str | None) -> None:
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="Мониторинг диска и очистка Docker при низком free space.")
-    parser.add_argument("--dry-run", action="store_true", help="Не выполнять docker prune, только логировать.")
+    parser = argparse.ArgumentParser(
+        description="Мониторинг диска и очистка Docker при низком free space."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Не выполнять docker prune, только логировать.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Один проход проверки и выход (для cron / ручного запуска).",
+    )
     args = parser.parse_args()
 
     cfg = get_config()
@@ -197,7 +228,9 @@ def run() -> None:
     _configure_logging(log_path)
 
     try:
-        raise SystemExit(asyncio.run(run_once(dry_run=args.dry_run)))
+        if args.once:
+            raise SystemExit(asyncio.run(run_once(dry_run=args.dry_run)))
+        raise SystemExit(asyncio.run(run_daemon(dry_run=args.dry_run)))
     except SystemExit:
         raise
     except Exception as e:
@@ -207,6 +240,5 @@ def run() -> None:
 
 if __name__ == "__main__":
     # Для запуска: python -m vibe.infra.disk_monitor
-    # Аргументы CLI (например --dry-run) обрабатываются в run().
+    # Аргументы CLI (например --dry-run, --once) обрабатываются в run().
     run()
-

@@ -5,13 +5,10 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from dotenv import load_dotenv
 from pydantic import Field, ValidationError, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Поддерживаем .env и .env.local для локальной разработки и Docker.
-load_dotenv(".env")
-load_dotenv(".env.local", override=True)
+# Переменные окружения и .env / .env.local читает pydantic-settings (model_config.env_file).
 
 
 def _sqlite_aiosqlite_url(path: str) -> str:
@@ -63,7 +60,7 @@ class AppConfig(BaseSettings):
     admin_id: int
     # Путь к SQLite файлу в volume Docker. По умолчанию: /app/data/bot.db
     database_path: str = Field(default="/app/data/bot.db", validation_alias="DATABASE_PATH")
-    database_url: str | None = None  # оставляем для обратной совместимости
+    database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
     log_level: str = "INFO"
     log_path: str | None = None
 
@@ -83,6 +80,12 @@ class AppConfig(BaseSettings):
     disk_monitor_state_file: str = Field(
         default="/app/data/disk_monitor_state.json",
         validation_alias="DISK_MONITOR_STATE_FILE",
+    )
+    # Интервал между проверками в режиме демона (docker-compose без внешнего cron).
+    disk_monitor_interval_sec: float = Field(
+        default=3600.0,
+        ge=60.0,
+        validation_alias="DISK_MONITOR_INTERVAL_SEC",
     )
 
     @computed_field  # type: ignore[prop-decorator]

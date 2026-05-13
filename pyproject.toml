@@ -47,8 +47,6 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+exclude = ["tests*"]

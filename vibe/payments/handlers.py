@@ -12,6 +12,7 @@ from loguru import logger
 from vibe.config import get_config
 from vibe.database import Database
 from vibe.payments.service import create_subscription_payment
+from vibe.payments.yookassa_api import YooKassaApiError
 
 router = Router()
 
@@ -54,9 +55,18 @@ async def cmd_buy(message: Message) -> None:
             telegram_id=telegram_id,
             amount_rub=_SUBSCRIPTION_PRICE_RUB,
         )
-    except Exception as exc:
+    except YooKassaApiError:
+        logger.exception("Ошибка API YooKassa при создании платежа")
+        await message.answer(
+            "Не удалось создать платёж: ошибка сервиса оплаты. "
+            "Попробуйте позже или проверьте настройки YooKassa."
+        )
+        return
+    except Exception:
         logger.exception("Не удалось создать платёж")
-        await message.answer(f"Не удалось создать платёж: {exc}")
+        await message.answer(
+            "Не удалось создать платёж. Попробуйте позже или обратитесь в поддержку."
+        )
         return
 
     await message.answer(

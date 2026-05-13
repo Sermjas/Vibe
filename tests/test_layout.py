@@ -1,6 +1,7 @@
 from pathlib import Path
 
 
-def test_src_layout_exists() -> None:
-    assert Path("src/vibe").exists()
+def test_package_layout_exists() -> None:
+    assert Path("vibe").exists()
+    assert Path("vibe/bot.py").exists()
 
