@@ -1,3 +1,0 @@
-[console_scripts]
-vibe-bot = vibe.bot:run
-vibe-disk-monitor = vibe.infra.disk_monitor:run
