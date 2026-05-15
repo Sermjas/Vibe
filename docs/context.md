@@ -3,8 +3,8 @@
 ## 📁 Состояние проекта
 - `vibe/config.py` ✅ (pydantic-settings / `.env`, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, DATABASE_URL, ADMIN_ID, get_config)
 - `vibe/ocr_service.py` ✅ (Gemini `gemini-2.5-flash-lite`, AFC off, 404/429 handling, сжатие фото в памяти, **строго JSON**: amount+category)
-- `vibe/bot.py` ✅ (/start с регистрацией, OCR из памяти, **подтверждение перед записью**, FSM, inline-статистика, /admin, /export, логи)
-- `vibe/database.py` ✅ (SQLAlchemy 2.0 async + aiosqlite, модели User/Transaction, **is_admin**, category/raw_data, запросы админки, экспорта и лимитов)
+- `vibe/bot.py` ✅ (/start без автосоздания, кнопка «Зарегистрироваться», пробный скан, подписка, OCR, FSM, статистика, /admin, /export)
+- `vibe/database.py` ✅ (SQLAlchemy 2.0 async + aiosqlite, User: **trial_attempt**, **subscription**, Transaction, подписки YooKassa)
 
 ### Экспорт в Excel
 - В меню статистики добавлена кнопка `📥 Export to Excel`.
@@ -20,8 +20,17 @@
   /docs
     context.md            # Текущий контекст проекта и решения
 
-### Поток работы (как должно быть)
-1. Пользователь отправляет `/start`, бот регистрирует пользователя в БД и показывает кнопку `📊 Моя статистика`.
+### Регистрация и доступ
+1. `/start` — бот получает `telegram_id` и `username`, проверяет наличие в `users` (без автосоздания).
+2. Если пользователя нет — inline-кнопка «Зарегистрироваться».
+3. После регистрации: `trial_attempt=False`, `subscription=False`; меню «Пробный скан чека» и «Оплатить подписку».
+4. Пробный скан: перед OCR повторная проверка `trial_attempt` по `telegram_id`; после успешного подтверждения записи — `trial_attempt=True`.
+5. Если `trial_attempt=True` и `subscription=False` — доступ к OCR/статистике закрыт, предложение оплаты (`/buy`).
+6. Если `subscription=True` (или `is_admin`) — полный доступ без ограничений.
+7. Контроль доступа: `vibe/payments/middleware.py` (`AccessMiddleware`).
+
+### Поток работы (OCR)
+1. Пользователь с подпиской отправляет фото чека (или пробный скан — один раз).
 2. Пользователь присылает фото чека.
 3. `vibe/bot.py` скачивает фото в `io.BytesIO` (без файлов на диске) и передаёт байты в `ocr_service.py`.
 4. OCR извлекает **сумму и категорию** (JSON). Бот **не записывает сразу** — показывает inline-кнопки подтверждения/исправления.
@@ -40,12 +49,6 @@
 - `ADMIN_ID` загружается только из `.env` через `vibe/config.py`.
 - Пользователь с `telegram_id == ADMIN_ID` автоматически получает `is_admin=True` и `is_active=True`.
 - Для ADMIN_ID не применяется суточный лимит OCR.
-
-### Суточный лимит OCR
-- Для обычных пользователей: максимум **3 успешных OCR-запроса** в сутки.
-- Проверка выполняется перед вызовом `ocr_service.py` в `bot.py` (пакет `vibe`).
-- Подсчёт делается в `database.py` функцией `check_user_limit(user_id)` по таблице `transactions` за текущий день (UTC).
-- При достижении лимита бот отвечает: `Your daily limit (3 receipts) has been reached. Please come back tomorrow!`
 
 ---
 
@@ -83,8 +86,9 @@
 - asyncio / async best practices
 
 ### Таблицы БД
-- `users`: `id`, `telegram_id`, `username`, `is_admin`, `is_active`, `reg_date`.
+- `users`: `id`, `telegram_id`, `username`, `is_admin`, `is_active`, `trial_attempt`, `subscription`, `reg_date`.
 - `transactions`: `id`, `user_id`, `amount (Numeric)`, `category`, `telegram_file_id`, `raw_data (JSON)`, `created_at`.
+- `subscriptions`: YooKassa, дата окончания (синхронизируется с `users.subscription` при оплате).
 
 ---
 

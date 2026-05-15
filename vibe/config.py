@@ -69,6 +69,8 @@ class AppConfig(BaseSettings):
     # а ошибки показывались только при попытке /buy.
     yookassa_shop_id: str | None = Field(default=None, validation_alias="YOOKASSA_SHOP_ID")
     yookassa_secret_key: str | None = Field(default=None, validation_alias="YOOKASSA_SECRET_KEY")
+    # Mock-режим: платежи без HTTP к api.yookassa.ru (тесты и локальная разработка).
+    yookassa_mock_mode: bool = Field(default=False, validation_alias="YOOKASSA_MOCK_MODE")
 
     # --- Инфраструктура / мониторинг диска Docker-хоста ---
     disk_monitor_path: str = Field(default="/", validation_alias="DISK_MONITOR_PATH")
@@ -118,3 +120,8 @@ def get_config() -> AppConfig:
         return AppConfig()
     except ValidationError as error:
         raise RuntimeError(f"Ошибка конфигурации окружения: {error}") from error
+
+
+def clear_config_cache() -> None:
+    """Сбрасывает кэш конфигурации (для тестов)."""
+    get_config.cache_clear()

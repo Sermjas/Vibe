@@ -16,21 +16,13 @@ from loguru import logger
 
 from vibe.config import AppConfig
 from vibe.database import Database
-from vibe.payments.yookassa_api import YooKassaCredentials, check_payment, create_payment
+from vibe.payments.yookassa_gateway import credentials_configured, get_payment_gateway
 
 
 @dataclass(frozen=True)
 class CreatePaymentResult:
     payment_url: str
     payment_id: str
-
-
-def _get_credentials(cfg: AppConfig) -> YooKassaCredentials | None:
-    shop_id = (getattr(cfg, "yookassa_shop_id", None) or "").strip()
-    secret = (getattr(cfg, "yookassa_secret_key", None) or "").strip()
-    if not shop_id or not secret:
-        return None
-    return YooKassaCredentials(shop_id=shop_id, secret_key=secret)
 
 
 async def create_subscription_payment(
@@ -40,14 +32,13 @@ async def create_subscription_payment(
     telegram_id: int,
     amount_rub: Decimal,
 ) -> CreatePaymentResult:
-    creds = _get_credentials(cfg)
-    if creds is None:
+    if not credentials_configured(cfg):
         raise RuntimeError("YooKassa не настроена: задайте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY")
 
-    payment_url, payment_id = await create_payment(
+    gateway = get_payment_gateway(cfg)
+    payment_url, payment_id = await gateway.create_payment(
         amount_rub,
         telegram_id,
-        credentials=creds,
         return_url="https://t.me",
         description="Подписка Vibe на 30 дней",
     )
@@ -77,12 +68,8 @@ async def process_payment_if_succeeded(
     *,
     payment_id: str,
 ) -> bool:
-    """Проверяет платёж, и если он succeeded — активирует подписку.
-
-    Возвращает True, если подписка была (или уже была) выдана для этого платежа.
-    """
-    creds = _get_credentials(cfg)
-    if creds is None:
+    """Проверяет платёж через API; при succeeded активирует подписку (идемпотентно)."""
+    if not credentials_configured(cfg):
         raise RuntimeError("YooKassa не настроена: задайте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY")
 
     record = await db.get_payment(payment_id)
@@ -91,7 +78,8 @@ async def process_payment_if_succeeded(
     if record.processed:
         return True
 
-    payload = await check_payment(payment_id, credentials=creds)
+    gateway = get_payment_gateway(cfg)
+    payload = await gateway.check_payment(payment_id)
     status = _extract_status(payload)
     await db.update_payment(
         payment_id=payment_id,
@@ -108,6 +96,7 @@ async def process_payment_if_succeeded(
         subscription_end_date=end_date,
         is_active=True,
     )
+    await db.set_user_subscription(record.telegram_id, active=True)
     await db.mark_payment_processed(payment_id)
     logger.info(f"Подписка активирована: telegram_id={record.telegram_id} until={end_date.isoformat()}")
     return True
@@ -123,7 +112,7 @@ async def run_payment_poller(
     logger.info("Payment poller запущен.")
     while True:
         try:
-            if _get_credentials(cfg) is None:
+            if not credentials_configured(cfg):
                 await asyncio.sleep(interval_s)
                 continue
             pending = await db.get_unprocessed_payments(limit=50)
@@ -141,4 +130,3 @@ async def run_payment_poller(
         except Exception:
             logger.exception("Payment poller: ошибка цикла, повтор через интервал")
             await asyncio.sleep(interval_s)
-

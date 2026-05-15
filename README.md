@@ -34,7 +34,6 @@
   ├── Dockerfile                # multi-stage, non-root, PYTHONPATH=/app
   ├── pyproject.toml            # зависимости, entry points: vibe-bot, vibe-disk-monitor
   ├── requirements.txt          # зависимости для Docker build
-  ├── tests/
   └── docs/context.md
 ```
 
@@ -68,7 +67,7 @@ python -m vibe.bot
 **Без `pip install -e .`:** задайте `PYTHONPATH=.` (текущий каталог — корень репозитория) и затем `python -m vibe.bot` (на Windows PowerShell: `$env:PYTHONPATH = "."`).
 
 ## ⚙️ Переменные окружения
-См. `.env.example` (также есть `.env.local.example` и `.env.docker.example`).
+См. `.env.example` и `.env.docker.example` (локальные переопределения — файл `.env.local`, см. `vibe/config.py`).
 
 Обязательные:
 - `TELEGRAM_BOT_TOKEN`

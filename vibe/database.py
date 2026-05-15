@@ -43,6 +43,10 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Статус доступа пользователя: False = ожидание подтверждения (модерация).
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # True — пробный скан уже использован.
+    trial_attempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # True — оплаченная подписка, полный доступ без ограничений.
+    subscription: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reg_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -171,9 +175,11 @@ class Database:
                 return
             await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
-        # users: is_admin / is_active
+        # users: is_admin / is_active / trial_attempt / subscription
         await add_column("users", "is_admin", "is_admin BOOLEAN NOT NULL DEFAULT 0")
         await add_column("users", "is_active", "is_active BOOLEAN NOT NULL DEFAULT 0")
+        await add_column("users", "trial_attempt", "trial_attempt BOOLEAN NOT NULL DEFAULT 0")
+        await add_column("users", "subscription", "subscription BOOLEAN NOT NULL DEFAULT 0")
 
         # transactions: category / raw_data
         await add_column("transactions", "category", "category VARCHAR(64)")
@@ -184,8 +190,66 @@ class Database:
             "raw_data TEXT",
         )
 
+    async def get_user_by_telegram_id(self, telegram_id: int) -> User | None:
+        """Возвращает пользователя по telegram_id без создания записи."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            return await session.scalar(stmt)
+
+    async def update_user_username(self, telegram_id: int, username: str | None) -> None:
+        """Обновляет username, если он изменился."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            user = await session.scalar(stmt)
+            if user is None or user.username == username:
+                return
+            user.username = username
+            await session.commit()
+
+    async def register_user(self, telegram_id: int, username: str | None) -> User:
+        """Регистрирует нового пользователя: trial_attempt=False, subscription=False."""
+        is_admin_user = telegram_id == self._admin_telegram_id
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            existing = await session.scalar(stmt)
+            if existing is not None:
+                return existing
+
+            user = User(
+                telegram_id=telegram_id,
+                username=username,
+                is_admin=is_admin_user,
+                is_active=True,
+                trial_attempt=False,
+                subscription=True if is_admin_user else False,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            return user
+
+    async def mark_trial_used(self, telegram_id: int) -> None:
+        """Помечает пробный скан как использованный."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            user = await session.scalar(stmt)
+            if user is None:
+                return
+            user.trial_attempt = True
+            await session.commit()
+
+    async def set_user_subscription(self, telegram_id: int, *, active: bool) -> None:
+        """Включает или отключает подписку пользователя."""
+        async with self._session_factory() as session:
+            stmt = select(User).where(User.telegram_id == telegram_id)
+            user = await session.scalar(stmt)
+            if user is None:
+                return
+            user.subscription = active
+            await session.commit()
+
     async def get_or_create_user(self, telegram_id: int, username: str | None) -> UserUpsertResult:
-        """Возвращает пользователя по telegram_id или создаёт нового."""
+        """Возвращает пользователя по telegram_id или создаёт нового (legacy: админка/модерация)."""
         is_admin_user = telegram_id == self._admin_telegram_id
         async with self._session_factory() as session:
             stmt = select(User).where(User.telegram_id == telegram_id)
@@ -195,10 +259,14 @@ class Database:
                 if existing.username != username:
                     existing.username = username
                     should_commit = True
-                # Админ всегда получает полные права и активный доступ.
-                if is_admin_user and (not existing.is_admin or not existing.is_active):
+                if is_admin_user and (
+                    not existing.is_admin
+                    or not existing.is_active
+                    or not existing.subscription
+                ):
                     existing.is_admin = True
                     existing.is_active = True
+                    existing.subscription = True
                     should_commit = True
                 if should_commit:
                     await session.commit()
@@ -208,7 +276,9 @@ class Database:
                 telegram_id=telegram_id,
                 username=username,
                 is_admin=is_admin_user,
-                is_active=True if is_admin_user else False,
+                is_active=True,
+                trial_attempt=False,
+                subscription=True if is_admin_user else False,
             )
             session.add(user)
             await session.commit()

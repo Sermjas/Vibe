@@ -86,18 +86,26 @@ async def cmd_status(message: Message) -> None:
     db = _get_db()
     telegram_id = message.from_user.id
 
-    sub = await db.get_subscription(telegram_id)
-    if sub is None or (not sub.is_active):
-        await message.answer("Подписка не активна. Чтобы оплатить: /buy")
+    user = await db.get_user_by_telegram_id(telegram_id)
+    if user is not None and user.subscription:
+        sub = await db.get_subscription(telegram_id)
+        end_date = sub.subscription_end_date if sub is not None else None
+        if end_date is not None:
+            await message.answer(
+                "Подписка активна.\n"
+                f"Действует до (UTC): {end_date.isoformat()}",
+            )
+            return
+        await message.answer("Подписка активна.")
         return
 
-    end_date = sub.subscription_end_date
-    if end_date is None:
+    sub = await db.get_subscription(telegram_id)
+    if sub is None or not sub.is_active or sub.subscription_end_date is None:
         await message.answer("Подписка не активна. Чтобы оплатить: /buy")
         return
 
     await message.answer(
         "Подписка активна.\n"
-        f"Действует до (UTC): {end_date.isoformat()}",
+        f"Действует до (UTC): {sub.subscription_end_date.isoformat()}",
     )
 
