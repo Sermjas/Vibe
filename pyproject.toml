@@ -47,6 +47,12 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
 
+[tool.basedpyright]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+reportMissingImports = "warning"
+
 [tool.setuptools.packages.find]
 where = ["."]
 exclude = ["tests*"]

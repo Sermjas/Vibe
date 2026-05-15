@@ -9,8 +9,10 @@ import re
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import cast
 
 import pandas as pd
+from pandas._typing import WriteExcelBuffer
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import BaseFilter, Command, CommandStart
@@ -29,7 +31,7 @@ from aiogram.types import (
 from loguru import logger
 
 from vibe.config import get_config
-from vibe.database import Database
+from vibe.database import Database, Transaction
 from vibe.ocr_service import OCR_RATE_LIMIT_ERROR, get_amount_from_checkpoint
 from vibe.payments.handlers import bind_db as bind_payments_db
 from vibe.payments.handlers import router as payments_router
@@ -265,7 +267,7 @@ def _parse_amount_from_text(text: str) -> Decimal | None:
         return None
 
 
-def _user_csv_bytes(txs: list) -> tuple[bytes, str]:
+def _user_csv_bytes(txs: list[Transaction]) -> tuple[bytes, str]:
     """Генерация CSV пользователя в памяти (csv + StringIO), без pandas."""
     output = io.StringIO()
     writer = csv.writer(output, delimiter=",", lineterminator="\n")
@@ -277,7 +279,7 @@ def _user_csv_bytes(txs: list) -> tuple[bytes, str]:
     return data, "my_transactions.csv"
 
 
-def _user_excel_bytes(txs: list) -> tuple[bytes, str]:
+def _user_excel_bytes(txs: list[Transaction]) -> tuple[bytes, str]:
     """Генерация Excel-файла в памяти через pandas и openpyxl."""
     table_rows = [
         {
@@ -288,13 +290,13 @@ def _user_excel_bytes(txs: list) -> tuple[bytes, str]:
         }
         for tx in txs
     ]
-    frame = pd.DataFrame(
+    frame = pd.DataFrame.from_records(
         table_rows,
         columns=["created_at_utc", "amount", "category", "telegram_file_id"],
     )
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(cast(WriteExcelBuffer, output), engine="openpyxl") as writer:
         frame.to_excel(writer, sheet_name="Отчёт", index=False)
     output.seek(0)
 
@@ -466,7 +468,11 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext) -> None:
             await message.answer("Ваш дневной лимит (3 чека) исчерпан. Пожалуйста, возвращайтесь завтра!")
             return
 
-    photo = message.photo[-1]
+    photos = message.photo
+    if not photos:
+        await message.answer("Не удалось получить фото. Попробуйте отправить его ещё раз.")
+        return
+    photo = photos[-1]
     image_buffer = io.BytesIO()
 
     try:
